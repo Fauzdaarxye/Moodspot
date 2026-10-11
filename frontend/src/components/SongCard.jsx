@@ -19,11 +19,20 @@ function AudioBar({ value, color }) {
   );
 }
 
+function formatFans(n) {
+  if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
+  if (n >= 1e3) return `${Math.round(n / 1e3)}K`;
+  return String(n);
+}
+
+const POPULAR_ARTIST_FANS = 100000;
+
 export default function SongCard({ song, index = 0 }) {
   const [hovered, setHovered] = useState(false);
   const [imgErr,  setImgErr]  = useState(false);
   const m = MOOD_COLORS[song.mood] || MOOD_COLORS.Unknown;
   const hasAudioFeatures = song.feature_source === 'spotify';
+  const isPopularArtist = (song.artist_fans ?? 0) >= POPULAR_ARTIST_FANS;
 
   return (
     <div
@@ -93,7 +102,7 @@ export default function SongCard({ song, index = 0 }) {
             display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap',
           }}>
             <span>{m.emoji} {(song.mood || 'UNKNOWN').toUpperCase()}</span>
-            {!hasAudioFeatures && (
+            {!hasAudioFeatures && isPopularArtist && (
               <span style={{
                 fontSize: 8, fontWeight: 800, opacity: 0.95,
                 background: 'rgba(0,0,0,0.35)', padding: '2px 6px', borderRadius: 8,
@@ -129,7 +138,7 @@ export default function SongCard({ song, index = 0 }) {
             display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap',
           }}>
             <span>{(song.mood || '').toUpperCase()}</span>
-            {!hasAudioFeatures && (
+            {!hasAudioFeatures && isPopularArtist && (
               <span style={{ fontSize: 8, opacity: 0.9 }}>POPULAR</span>
             )}
           </div>
@@ -187,7 +196,9 @@ export default function SongCard({ song, index = 0 }) {
             fontSize: 11,
             lineHeight: 1.45,
           }}>
-            Ranked by Spotify popularity because track-level audio analysis is unavailable.
+            {song.artist_fans != null
+              ? `Artist popularity: ${formatFans(song.artist_fans)} fans on Deezer.`
+              : 'Track-level audio analysis is unavailable from Spotify.'}
           </div>
         )}
 

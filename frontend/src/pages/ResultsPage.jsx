@@ -177,8 +177,8 @@ export default function ResultsPage({
           lineHeight: 1.55,
           border: `1px solid ${m.color}33`,
         }}>
-          Spotify audio analysis is unavailable for this API account, so this list is using popular Spotify search results
-          instead of fake audio-feature averages.
+          Spotify audio analysis is unavailable for this API account, so this list is ranked by artist popularity
+          ({rare ? 'new and lesser-known artists' : 'most-listened artists first'}) instead of fake audio-feature averages.
         </div>
       )}
 

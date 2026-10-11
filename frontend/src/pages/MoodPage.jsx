@@ -1,13 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:5000';
-
-const MOOD_AUDIO_DEFAULTS = {
-  Happy:    { valence: 0.75, energy: 0.72, danceability: 0.68, tempo: 118 },
-  Sad:      { valence: 0.28, energy: 0.32, danceability: 0.35, tempo: 82  },
-  Energetic:{ valence: 0.62, energy: 0.88, danceability: 0.72, tempo: 132 },
-  Calm:     { valence: 0.48, energy: 0.22, danceability: 0.28, tempo: 88  },
-};
 
 const MOODS = [
   {
@@ -42,13 +35,6 @@ export default function MoodPage({ navigate }) {
   const [loading,    setLoading]    = useState(false);
   const [error,      setError]      = useState('');
   const [rare,       setRare]       = useState(false);
-  const [audioFeats, setAudioFeats] = useState(() => ({ ...MOOD_AUDIO_DEFAULTS.Happy }));
-
-  useEffect(() => {
-    if (selected && MOOD_AUDIO_DEFAULTS[selected]) {
-      setAudioFeats({ ...MOOD_AUDIO_DEFAULTS[selected] });
-    }
-  }, [selected]);
 
   const fetchSongs = async () => {
     if (!selected) return;
@@ -59,10 +45,6 @@ export default function MoodPage({ navigate }) {
         mood:         selected,
         limit:        String(limit),
         rare:         String(rare),
-        valence:      String(audioFeats.valence),
-        energy:       String(audioFeats.energy),
-        danceability: String(audioFeats.danceability),
-        tempo:        String(audioFeats.tempo),
       });
 
       const res  = await fetch(`${API}/recommend?${params}`);
@@ -164,11 +146,11 @@ export default function MoodPage({ navigate }) {
       </div>
 
       {/* ── Discovery mode toggle ─────────────────────────────────────────── */}
-      <div className="glass" style={{ padding: '22px 28px', marginBottom: 18 }}>
+      <div className="glass" style={{ padding: '22px 28px', marginBottom: 28 }}>
         <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 4 }}>Discovery mode</div>
         <p style={{ color: 'var(--text3)', fontSize: 12, marginBottom: 18, lineHeight: 1.5 }}>
-          <strong style={{ color: 'var(--text2)' }}>Popular</strong> prioritizes listenable, well-known songs that still match your audio profile.&nbsp;
-          <strong style={{ color: 'var(--teal)' }}>Rare Gems</strong> is optional and intentionally lowers popularity for discovery.
+          <strong style={{ color: 'var(--text2)' }}>Popular</strong> (default) shows widely-listened songs from well-known artists first.&nbsp;
+          <strong style={{ color: 'var(--teal)' }}>Rare Gems</strong> switches to songs by new and lesser-known artists.
         </p>
 
         <div style={{ display: 'flex', gap: 10 }}>
@@ -231,43 +213,10 @@ export default function MoodPage({ navigate }) {
             borderRadius: 10, padding: '10px 14px',
             fontSize: 12, color: 'var(--teal)', lineHeight: 1.5,
           }}>
-            💎 Rare Gems mode active — you'll discover songs most people have never heard, perfectly matched to your mood.
+            💎 Rare Gems mode active — you'll discover songs by new and lesser-known artists that match your mood.
           </div>
         )}
       </div>
-
-      {/* Audio feature targets */}
-      {selected && (
-        <div className="glass" style={{ padding: '22px 28px', marginBottom: 28 }}>
-          <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 4 }}>Audio feature targets</div>
-          <p style={{ color: 'var(--text3)', fontSize: 12, marginBottom: 18, lineHeight: 1.5 }}>
-            Fine-tune the audio profile for this mood. Songs must stay near these values,
-            but exact percentages are not required; popular, listenable matches rank first.
-          </p>
-          {[
-            { key: 'valence',      label: 'Valence (positivity)', min: 0,   max: 1,   step: 0.01, fmt: v => `${(v * 100).toFixed(0)}%` },
-            { key: 'energy',       label: 'Energy',               min: 0,   max: 1,   step: 0.01, fmt: v => `${(v * 100).toFixed(0)}%` },
-            { key: 'danceability', label: 'Danceability',         min: 0,   max: 1,   step: 0.01, fmt: v => `${(v * 100).toFixed(0)}%` },
-            { key: 'tempo',        label: 'Tempo (BPM)',          min: 40,  max: 200, step: 1,    fmt: v => `${Math.round(v)} BPM` },
-          ].map(row => (
-            <div key={row.key} style={{ marginBottom: 16 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6, fontSize: 12 }}>
-                <span style={{ color: 'var(--text2)', fontWeight: 600 }}>{row.label}</span>
-                <span style={{ color: 'var(--green)', fontFamily: 'Syne', fontWeight: 700, fontSize: 12 }}>
-                  {row.fmt(audioFeats[row.key])}
-                </span>
-              </div>
-              <input
-                type="range"
-                min={row.min} max={row.max} step={row.step}
-                value={audioFeats[row.key]}
-                onChange={e => setAudioFeats(prev => ({ ...prev, [row.key]: Number(e.target.value) }))}
-                style={{ width: '100%', accentColor: 'var(--green)', cursor: 'pointer' }}
-              />
-            </div>
-          ))}
-        </div>
-      )}
 
       {/* Error */}
       {error && (

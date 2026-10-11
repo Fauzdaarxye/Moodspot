@@ -5,11 +5,11 @@ Key changes vs original:
   1. NEARBY MATCHING – songs do not need exact audio-feature percentages.
      They must sit inside a reasonable nearby band, then are ranked by
      closeness to the requested profile.
-  2. POPULARITY-FIRST – Spotify `popularity` (0-100) is used as a primary
-     sort signal so well-known, listenable tracks surface before obscure ones.
-  3. RARE MODE (?rare=true / POST body) – inverts the popularity sort so
-     low-popularity, niche tracks are preferred. Lets users intentionally
-     discover hidden gems.
+  2. POPULARITY-FIRST – well-known, widely-listened tracks surface first.
+     Spotify stopped returning `popularity` in Feb 2026, so artist popularity
+     now comes from Deezer's public API (artist fan count).
+  3. RARE MODE (?rare=true / POST body) – prefers new / lesser-known artists
+     (under 100k Deezer fans) so users can intentionally discover hidden gems.
   4. IMPROVED QUERY POOLS – more genre-diverse, era-diverse queries per mood
      to increase the variety and quality of fetched tracks.
   5. SCORE BLENDING – final rank = 0.45 * mood_fit + 0.55 * popularity_norm
@@ -20,8 +20,11 @@ sp.recommendations() and sp.audio_features() were removed/restricted by
 Spotify in Nov 2024.  We rely on sp.search() + random offsets + soft scoring.
 """
 
-import os, json, pickle, random, math
+import os, json, pickle, random, math, time, threading
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 import numpy as np
+import requests
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from dotenv import load_dotenv
@@ -127,6 +130,18 @@ POPULAR_MODE_MIN_POPULARITY = 35
 POPULAR_MODE_STRONG_POPULARITY = 50
 SEARCH_ONLY_MIN_POPULARITY = 55
 SEARCH_ONLY_RELAXED_POPULARITY = 40
+
+# ── Artist popularity (Deezer fan counts) ─────────────────────────────────────
+# Spotify Dev Mode (Feb 2026) returns no popularity/followers at all, so artist
+# popularity comes from Deezer's public, keyless API (`nb_fan` per artist).
+#   Popular mode: primary artist >= POPULAR_MIN_FANS, most fans first.
+#   Rare mode:    primary artist <  RARE_MAX_FANS (new / lesser-known artists).
+POPULAR_MIN_FANS         = 100_000
+POPULAR_RELAXED_MIN_FANS = 20_000
+RARE_MAX_FANS            = 100_000
+RARE_MIN_FANS            = 500      # below this is usually playlist filler
+MAX_TRACKS_PER_ARTIST    = 2
+MAX_ARTIST_LOOKUPS       = 36       # per request (fits one Deezer rate window); cached ones are free
 
 LOW_QUALITY_TERMS = (
     "karaoke", "tribute", "cover version", "made famous by", "sound alike",
@@ -360,7 +375,7 @@ def is_listenable_search_result(track: dict, mood: str, relaxed: bool = False) -
 
 # ── format_track ─────────────────────────────────────────────────────────────
 def format_track(track: dict, af: dict, mood: str, confidence: float = 0,
-                 profile_af=None, fit_score: float = 0.0):
+                 profile_af=None, fit_score: float = 0.0, artist_fans=None):
     images = track.get("album", {}).get("images", [])
     if af:
         src, feature_source = af, "spotify"
@@ -378,6 +393,7 @@ def format_track(track: dict, af: dict, mood: str, confidence: float = 0,
         "preview_url":    track.get("preview_url"),
         "spotify_url":    track.get("external_urls", {}).get("spotify"),
         "popularity":     track.get("popularity") or 0,
+        "artist_fans":    artist_fans,
         "mood":           mood,
         "confidence":     confidence,
         "fit_score":      round(fit_score * 100, 1),   # percentage for UI
@@ -426,6 +442,127 @@ def _search_random_page(query: str, market: str = "US", popular_bias: bool = Tru
         print(f"search error '{query}' (offset={offset}): {e}")
         return []
 
+# ── Deezer artist popularity lookup ───────────────────────────────────────────
+DEEZER_ARTIST_SEARCH = "https://api.deezer.com/search/artist"
+DEEZER_WINDOW_SECS   = 5.0
+DEEZER_WINDOW_LIMIT  = 40           # Deezer allows 50 requests / 5 s per IP
+_ARTIST_CACHE_MAX    = 5000
+
+_deezer_http   = requests.Session()
+_deezer_lock   = threading.Lock()
+_deezer_calls  = deque()             # timestamps of recent Deezer requests
+_artist_fans   = {}                  # lowercase artist name -> int | None
+
+def _deezer_throttle():
+    """Block until a request fits inside Deezer's rate window."""
+    while True:
+        with _deezer_lock:
+            now = time.monotonic()
+            while _deezer_calls and now - _deezer_calls[0] > DEEZER_WINDOW_SECS:
+                _deezer_calls.popleft()
+            if len(_deezer_calls) < DEEZER_WINDOW_LIMIT:
+                _deezer_calls.append(now)
+                return
+            wait = DEEZER_WINDOW_SECS - (now - _deezer_calls[0]) + 0.05
+        time.sleep(max(wait, 0.05))
+
+def _lookup_artist_fans(name: str):
+    """Deezer fan count for an exact (case-insensitive) artist name match.
+    Returns None when the artist is unknown or Deezer can't be reached;
+    only definite answers are cached."""
+    key = name.strip().lower()
+    if key in _artist_fans:
+        return _artist_fans[key]
+    for attempt in range(2):
+        _deezer_throttle()
+        try:
+            resp = _deezer_http.get(DEEZER_ARTIST_SEARCH,
+                                    params={"q": name, "limit": 5}, timeout=5)
+            payload = resp.json()
+        except Exception as e:
+            print(f"deezer lookup failed '{name}': {e}")
+            return None
+        err = payload.get("error")
+        if err:
+            if err.get("code") == 4 and attempt == 0:   # quota: wait and retry once
+                time.sleep(1.0)
+                continue
+            print(f"deezer error '{name}': {err}")
+            return None
+        matches = [d.get("nb_fan") or 0 for d in payload.get("data") or []
+                   if (d.get("name") or "").strip().lower() == key]
+        fans = max(matches) if matches else None
+        if len(_artist_fans) >= _ARTIST_CACHE_MAX:
+            _artist_fans.clear()
+        _artist_fans[key] = fans
+        return fans
+    return None
+
+def _primary_artist(track: dict) -> str:
+    artists = track.get("artists") or []
+    return (artists[0].get("name") or "") if artists else ""
+
+def artist_fans_for(tracks: list) -> dict:
+    """Map primary-artist name -> Deezer fans (None = unknown) for tracks.
+    Uncached lookups are capped at MAX_ARTIST_LOOKUPS per call."""
+    names = []
+    for t in tracks:
+        n = _primary_artist(t)
+        if n and n not in names:
+            names.append(n)
+    todo = [n for n in names if n.strip().lower() not in _artist_fans][:MAX_ARTIST_LOOKUPS]
+    if todo:
+        with ThreadPoolExecutor(max_workers=6) as ex:
+            list(ex.map(_lookup_artist_fans, todo))
+    return {n: _artist_fans.get(n.strip().lower()) for n in names}
+
+def _song_key(track: dict) -> tuple:
+    """Same song across albums/remasters: primary artist + base title."""
+    title = (track.get("name") or "").lower()
+    for sep in (" - ", " (", " ["):
+        title = title.split(sep)[0]
+    return (_primary_artist(track).lower(), title.strip())
+
+def _cap_per_artist(items: list, cap: int = MAX_TRACKS_PER_ARTIST) -> list:
+    counts, songs, out = {}, set(), []
+    for item in items:
+        a = _primary_artist(item[0]).lower()
+        key = _song_key(item[0])
+        if counts.get(a, 0) < cap and key not in songs:
+            counts[a] = counts.get(a, 0) + 1
+            songs.add(key)
+            out.append(item)
+    return out
+
+def rank_by_artist_popularity(pool: list, limit: int, rare: bool) -> list:
+    """pool: list of (track, ...) in Spotify search order.
+    Returns list of (track, fans) ordered for the requested mode, or [] if
+    no artist popularity is available (caller then keeps Spotify order)."""
+    fans_map = artist_fans_for([p[0] for p in pool])
+    if not any(v is not None for v in fans_map.values()):
+        return []
+    scored = [(p[0], fans_map.get(_primary_artist(p[0]))) for p in pool]
+
+    if not rare:
+        known = [s for s in scored if s[1] is not None]
+        known.sort(key=lambda s: s[1], reverse=True)
+        chosen = [s for s in known if s[1] >= POPULAR_MIN_FANS]
+        if len(_cap_per_artist(chosen)) < limit:
+            chosen = [s for s in known if s[1] >= POPULAR_RELAXED_MIN_FANS]
+        out = _cap_per_artist(chosen)
+        if len(out) < limit:                   # top up in Spotify search order
+            out = _cap_per_artist(out + [s for s in scored if s not in out])
+        return out[:limit]
+
+    gems = [s for s in scored if s[1] is not None and RARE_MIN_FANS <= s[1] < RARE_MAX_FANS]
+    random.shuffle(gems)                       # variety between refreshes
+    out = _cap_per_artist(gems, cap=1)
+    if len(out) < limit:                       # top up with tiny / unknown artists
+        extra = [s for s in scored if s not in gems
+                 and (s[1] is None or s[1] < RARE_MIN_FANS)]
+        out = _cap_per_artist(out + extra, cap=1)
+    return out[:limit]
+
 # ── MAIN FETCH FUNCTION (with soft scoring + popularity ranking) ──────────────
 def fetch_songs_for_mood(mood: str, limit: int, feature_targets=None,
                           rare: bool = False) -> list:
@@ -451,6 +588,10 @@ def fetch_songs_for_mood(mood: str, limit: int, feature_targets=None,
     query_key = "popular_queries" if (not rare and not _AUDIO_FEATURES_AVAILABLE) else "queries"
     queries = list(MOOD_CONFIG[mood].get(query_key, MOOD_CONFIG[mood]["queries"]))
     random.shuffle(queries)
+    if query_key == "popular_queries":
+        # The popular pool is small; search each query twice (different
+        # top-of-results offsets) so there are enough candidates to rank.
+        queries = queries + random.sample(queries, len(queries))
 
     seen_ids    = set()
     raw_pool        = []   # list of (track_dict, popularity)
@@ -458,19 +599,15 @@ def fetch_songs_for_mood(mood: str, limit: int, feature_targets=None,
     af_pool         = []   # list of (track_dict, af_dict, fit_score, popularity)
     relaxed_af_pool = []   # backup candidates when popular tracks are sparse
 
-    pages_done  = 0
-    query_iter  = iter(queries)
+    # Fetch all search pages in parallel (sequential calls took ~5 s), then
+    # process them in query order so Spotify's relevance order is preserved.
+    page_queries = queries[:MAX_SEARCH_PAGES]
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        pages = list(ex.map(lambda q: _search_random_page(q, popular_bias=(not rare)),
+                            page_queries))
 
     # Collect tracks until we have enough candidates or exhaust queries
-    while pages_done < MAX_SEARCH_PAGES:
-        try:
-            query = next(query_iter)
-        except StopIteration:
-            break
-
-        tracks = _search_random_page(query, popular_bias=(not rare))
-        pages_done += 1
-
+    for tracks in pages:
         fresh = [t for t in tracks if t and t.get("id") and t["id"] not in seen_ids]
         if not fresh:
             continue
@@ -530,11 +667,18 @@ def fetch_songs_for_mood(mood: str, limit: int, feature_targets=None,
         return results
 
     # ── Fallback: no audio features from Spotify ──────────────────────────────
-    # Rank by popularity only
-    if len(raw_pool) < limit and relaxed_raw_pool:
-        relaxed_raw_pool.sort(key=lambda x: x[1], reverse=True)
-        raw_pool.extend(relaxed_raw_pool[:limit - len(raw_pool)])
+    # Rank by primary-artist popularity (Deezer fans): most-listened artists
+    # first, or new / lesser-known artists in rare mode.
+    if len(raw_pool) < limit * 2 and relaxed_raw_pool:
+        raw_pool.extend(relaxed_raw_pool)
 
+    ranked = rank_by_artist_popularity(raw_pool, limit, rare)
+    if ranked:
+        return [format_track(t, {}, mood, 0, profile_af=None, fit_score=0.0,
+                             artist_fans=fans)
+                for t, fans in ranked]
+
+    # Deezer unavailable: keep Spotify's search-relevance order.
     raw_pool.sort(key=lambda x: x[1], reverse=(not rare))
     out = []
     for t, _ in raw_pool[:limit]:
