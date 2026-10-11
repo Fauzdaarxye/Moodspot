@@ -339,17 +339,22 @@ def _lower_track_text(track: dict) -> str:
     return f"{track.get('name', '')} {artist_names} {album_name}".lower()
 
 def is_listenable_search_result(track: dict, mood: str, relaxed: bool = False) -> bool:
-    popularity = track.get("popularity", 0)
-    min_popularity = SEARCH_ONLY_RELAXED_POPULARITY if relaxed else SEARCH_ONLY_MIN_POPULARITY
-    if popularity < min_popularity:
-        return False
+    # Since Spotify's Feb 2026 Dev Mode changes, track objects no longer carry
+    # `popularity`. When it is missing, skip the popularity gate and rely on
+    # Spotify's own search-relevance order plus the text filters below.
+    popularity = track.get("popularity")
+    if popularity is not None:
+        min_popularity = SEARCH_ONLY_RELAXED_POPULARITY if relaxed else SEARCH_ONLY_MIN_POPULARITY
+        if popularity < min_popularity:
+            return False
 
     text = _lower_track_text(track)
     if any(term in text for term in LOW_QUALITY_TERMS):
         return False
     if any(term in text for term in MOOD_BLOCK_TERMS.get(mood, ())):
         return False
-    if "various artists" in text and popularity < POPULAR_MODE_STRONG_POPULARITY:
+    if ("various artists" in text and popularity is not None
+            and popularity < POPULAR_MODE_STRONG_POPULARITY):
         return False
     return True
 
@@ -372,7 +377,7 @@ def format_track(track: dict, af: dict, mood: str, confidence: float = 0,
         "image":          images[0]["url"] if images else None,
         "preview_url":    track.get("preview_url"),
         "spotify_url":    track.get("external_urls", {}).get("spotify"),
-        "popularity":     track.get("popularity", 0),
+        "popularity":     track.get("popularity") or 0,
         "mood":           mood,
         "confidence":     confidence,
         "fit_score":      round(fit_score * 100, 1),   # percentage for UI
@@ -474,7 +479,9 @@ def fetch_songs_for_mood(mood: str, limit: int, feature_targets=None,
         # Try audio-feature soft scoring
         af_map = bulk_audio_features([t["id"] for t in fresh])
         for t in fresh:
-            pop = t.get("popularity", 0)
+            # Missing popularity (Spotify Dev Mode) -> 0; sort is stable, so
+            # those tracks keep Spotify's search-relevance order.
+            pop = t.get("popularity") or 0
             af  = af_map.get(t["id"], {})
             if af:
                 fit = mood_fit_score(af, profile, mood)

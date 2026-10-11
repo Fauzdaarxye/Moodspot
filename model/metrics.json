@@ -72,12 +72,12 @@
     }
   },
   "feature_importances": {
-    "valence": 0.2875,
-    "energy": 0.2587,
-    "danceability": 0.0817,
-    "tempo": 0.133,
-    "acousticness": 0.1551,
-    "loudness": 0.084
+    "valence": 0.2862,
+    "energy": 0.2598,
+    "danceability": 0.0819,
+    "tempo": 0.1322,
+    "acousticness": 0.1558,
+    "loudness": 0.0841
   },
   "mood_distribution": {
     "Calm": 300,
